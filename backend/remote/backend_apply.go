@@ -119,7 +119,7 @@ func (b *Remote) opApply(stopCtx, cancelCtx context.Context, op *backend.Operati
 	// This check is also performed in the plan method to determine if
 	// the policies should be checked, but we need to check the values
 	// here again to determine if we are done and should return.
-	if !r.HasChanges || r.Status == tfe.RunErrored {
+	if !r.HasChanges || r.Status == tfe.RunCanceled || r.Status == tfe.RunErrored {
 		return r, nil
 	}
 
@@ -177,14 +177,19 @@ func (b *Remote) opApply(stopCtx, cancelCtx context.Context, op *backend.Operati
 					"Only 'yes' will be accepted to approve."
 			}
 
-			if err = b.confirm(stopCtx, op, opts, r, "yes"); err != nil {
+			if err = b.confirm(stopCtx, op, opts, r, "yes"); err != nil && err != errRunStateChanged {
 				return r, err
 			}
 		}
 
-		err = b.client.Runs.Apply(stopCtx, r.ID, tfe.RunApplyOptions{})
-		if err != nil {
-			return r, generalError("Failed to approve the apply command", err)
+		if err == nil {
+			if err = b.client.Runs.Apply(stopCtx, r.ID, tfe.RunApplyOptions{}); err != nil {
+				return r, generalError("Failed to approve the apply command", err)
+			}
+		} else {
+			if b.CLI != nil {
+				b.CLI.Output(b.Colorize().Color("[reset][yellow]approved using the UI or API[reset]\n"))
+			}
 		}
 	}
 

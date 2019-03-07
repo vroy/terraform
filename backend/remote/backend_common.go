@@ -15,6 +15,8 @@ import (
 	"github.com/hashicorp/terraform/tfdiags"
 )
 
+var errRunStateChanged = errors.New("unexpected run state")
+
 // backoff will perform exponential backoff based on the iteration and
 // limited by the provided min and max (in milliseconds) durations.
 func backoff(min, max float64, iter int) time.Duration {
@@ -296,12 +298,18 @@ func (b *Remote) checkPolicy(stopCtx, cancelCtx context.Context, op *backend.Ope
 			Description: "Only 'override' will be accepted to override.",
 		}
 
-		if err = b.confirm(stopCtx, op, opts, r, "override"); err != nil {
+		if err = b.confirm(stopCtx, op, opts, r, "override"); err != nil && err != errRunStateChanged {
 			return err
 		}
 
-		if _, err = b.client.PolicyChecks.Override(stopCtx, pc.ID); err != nil {
-			return generalError("Failed to override policy check", err)
+		if err == nil {
+			if _, err = b.client.PolicyChecks.Override(stopCtx, pc.ID); err != nil {
+				return generalError("Failed to override policy check", err)
+			}
+		} else {
+			if b.CLI != nil {
+				b.CLI.Output(b.Colorize().Color("[reset][yellow]overridden using the UI or API[reset]\n"))
+			}
 		}
 
 		if b.CLI != nil {
@@ -313,35 +321,72 @@ func (b *Remote) checkPolicy(stopCtx, cancelCtx context.Context, op *backend.Ope
 }
 
 func (b *Remote) confirm(stopCtx context.Context, op *backend.Operation, opts *terraform.InputOpts, r *tfe.Run, keyword string) error {
-	v, err := op.UIIn.Input(opts)
-	if err != nil {
-		return fmt.Errorf("Error asking %s: %v", opts.Id, err)
-	}
-	if v != keyword {
-		// Retrieve the run again to get its current status.
-		r, err = b.client.Runs.Read(stopCtx, r.ID)
-		if err != nil {
-			return generalError("Failed to retrieve run", err)
-		}
+	ctx, cancel := context.WithCancel(stopCtx)
+	result := make(chan error, 2)
 
-		// Make sure we discard the run if possible.
-		if r.Actions.IsDiscardable {
-			err = b.client.Runs.Discard(stopCtx, r.ID, tfe.RunDiscardOptions{})
-			if err != nil {
-				if op.Destroy {
-					return generalError("Failed to discard destroy", err)
+	go func() {
+		defer cancel()
+		result <- func() error {
+			for {
+				select {
+				case <-stopCtx.Done():
+					return nil
+				case <-time.After(3 * time.Second):
+					// Retrieve the run again to get its current status.
+					r, err := b.client.Runs.Read(stopCtx, r.ID)
+					if err != nil {
+						return generalError("Failed to retrieve run", err)
+					}
+					switch keyword {
+					case "override":
+						// Return if the policy can not be overridden.
+						if r.Status != tfe.RunPolicyOverride {
+							return errRunStateChanged
+						}
+					case "yes":
+						// Return if the run is no longer confirmable.
+						if !r.Actions.IsConfirmable {
+							return errRunStateChanged
+						}
+					}
 				}
-				return generalError("Failed to discard apply", err)
 			}
+		}()
+	}()
+
+	result <- func() error {
+		v, err := op.UIIn.Input(ctx, opts)
+		if err != nil && err != context.Canceled {
+			return fmt.Errorf("Error asking %s: %v", opts.Id, err)
+		}
+		if v != keyword && err != context.Canceled {
+			// Retrieve the run again to get its current status.
+			r, err = b.client.Runs.Read(stopCtx, r.ID)
+			if err != nil {
+				return generalError("Failed to retrieve run", err)
+			}
+
+			// Make sure we discard the run if possible.
+			if r.Actions.IsDiscardable {
+				err = b.client.Runs.Discard(stopCtx, r.ID, tfe.RunDiscardOptions{})
+				if err != nil {
+					if op.Destroy {
+						return generalError("Failed to discard destroy", err)
+					}
+					return generalError("Failed to discard apply", err)
+				}
+			}
+
+			// Even if the run was discarded successfully, we still
+			// return an error as the apply command was canceled.
+			if op.Destroy {
+				return errors.New("Destroy discarded.")
+			}
+			return errors.New("Apply discarded.")
 		}
 
-		// Even if the run was disarding successfully, we still
-		// return an error as the apply command was cancelled.
-		if op.Destroy {
-			return errors.New("Destroy discarded.")
-		}
-		return errors.New("Apply discarded.")
-	}
+		return nil
+	}()
 
-	return nil
+	return <-result
 }
