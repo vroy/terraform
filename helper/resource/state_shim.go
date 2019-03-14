@@ -4,13 +4,12 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform/addrs"
-	"github.com/zclconf/go-cty/cty"
-
 	"github.com/hashicorp/terraform/config/hcl2shim"
+	"github.com/hashicorp/terraform/helper/plugin"
 	"github.com/hashicorp/terraform/helper/schema"
-
 	"github.com/hashicorp/terraform/states"
 	"github.com/hashicorp/terraform/terraform"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // shimState takes a new *states.State and reverts it to a legacy state for the provider ACC tests
@@ -70,6 +69,7 @@ func shimNewState(newState *states.State, providers map[string]terraform.Resourc
 						"schema_version": i.Current.SchemaVersion,
 					}
 				}
+				plugin.FixupAsSingleInstanceStateIn(resState.Primary, resource)
 
 				for _, dep := range i.Current.Dependencies {
 					resState.Dependencies = append(resState.Dependencies, dep.String())
@@ -106,6 +106,7 @@ func shimNewState(newState *states.State, providers map[string]terraform.Resourc
 							"schema_version": dep.SchemaVersion,
 						}
 					}
+					plugin.FixupAsSingleInstanceStateIn(deposed, resource)
 
 					resState.Deposed = append(resState.Deposed, deposed)
 				}

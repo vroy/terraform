@@ -878,13 +878,13 @@ func testResource(c TestStep, state *terraform.State) (*terraform.ResourceState,
 // into smaller pieces more easily.
 func ComposeTestCheckFunc(fs ...TestCheckFunc) TestCheckFunc {
 	return func(s *terraform.State) error {
+		var errs error
 		for i, f := range fs {
 			if err := f(s); err != nil {
-				return fmt.Errorf("Check %d/%d error: %s", i+1, len(fs), err)
+				errs = multierror.Append(errs, fmt.Errorf("Check %d/%d error: %s", i+1, len(fs), err))
 			}
 		}
-
-		return nil
+		return errs
 	}
 }
 
